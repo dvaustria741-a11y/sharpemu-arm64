@@ -30,3 +30,35 @@ path = "src/SharpEmu.LibAtrac9/**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2018 Alex Barney"
 SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = [
+    "platform/android/**",
+    "src/SharpEmu.Android/**"
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "SharpEmu Emulator Project"
+SPDX-License-Identifier = "GPL-2.0-or-later"
+
+[[annotations]]
+path = "platform/android/externals/sdl3-android-java/**"
+precedence = "override"
+SPDX-FileCopyrightText = "1997-2026 Sam Lantinga <slouken@libsdl.org>"
+SPDX-License-Identifier = "Zlib"
+
+[[annotations]]
+path = "platform/android/app/src/main/jniLibs/arm64-v8a/libVkLayer_khronos_validation.so"
+precedence = "override"
+SPDX-FileCopyrightText = "The Khronos Group Inc."
+SPDX-License-Identifier = "Apache-2.0"
+
+
+[[annotations]]
+path = [
+    "platform/android/gradle/wrapper/gradle-wrapper.jar",
+    "platform/android/gradle/wrapper/gradle-wrapper.properties"
+]
+precedence = "override"
+SPDX-FileCopyrightText = "the original author or authors"
+SPDX-License-Identifier = "Apache-2.0"
+
