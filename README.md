@@ -15,8 +15,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 ---
 
-## English
-
 ### About
 
 This project is an **unofficial fork** of [SharpEmu](https://github.com/sharpemu/sharpemu), created only as a **proof of concept for ARM64 devices**, with initial support focused on **Android ARM64**.
