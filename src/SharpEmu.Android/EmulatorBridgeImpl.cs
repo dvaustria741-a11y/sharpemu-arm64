@@ -1,7 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Text.Json;
 using Android.Views;
+using Microsoft.Win32.SafeHandles;
 using Org.Sharpemu.Android.Core;
 using SharpEmu.HLE.Host;
 
@@ -61,8 +63,33 @@ public sealed class EmulatorBridgeImpl : Java.Lang.Object, IEmulatorBridge
     public string GetGameSettings(string gameId) => "{\"id\":\"" + gameId + "\",\"settings\":[]}";
     public bool UpdateGameSetting(string gameId, string section, string key, string value) => false;
     public bool ResetGameSetting(string gameId, string section, string key) => false;
-    public string InstallPkg(string displayName, int fd, string sourcePath, string installRootPath) => "{}";
-    public int InstallProgress => 0;
+    public string InstallPkg(string displayName, int fd, string sourcePath, string installRootPath)
+    {
+        try
+        {
+            using Stream source = string.IsNullOrEmpty(sourcePath)
+                ? new FileStream(new SafeFileHandle((IntPtr)fd, ownsHandle: true), FileAccess.Read)
+                : File.OpenRead(sourcePath);
+
+            var result = PkgInstaller.Install(displayName, source, installRootPath);
+
+            // A successful eboot.bin extraction (once PFS support lands) still needs registering with
+            // the library the same way the "add folder" flow does; today Install() never reports Ok
+            // for that reason (see PkgInstaller's doc comment), so this is a no-op but kept ready.
+            if (result.Ok)
+            {
+                GameLibraryStore.AddGameFolder(displayName, result.Path);
+            }
+
+            return JsonSerializer.Serialize(new { ok = result.Ok, message = result.Message, path = result.Path });
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return JsonSerializer.Serialize(new { ok = false, message = $"Could not open PKG: {exception.Message}", path = "" });
+        }
+    }
+
+    public int InstallProgress => PkgInstaller.Progress;
     public int DeleteProgress => 0;
     public void CancelInstallPkg() { }
     public string GpuDrivers => "[]";
