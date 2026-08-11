@@ -49,7 +49,7 @@ For now, this repository should be treated strictly as an **early proof of conce
 
 ---
 
-## Legal / Aviso
+## Legal
 
 This project is intended for research and educational purposes. It does not include copyrighted system firmware, game data, or proprietary PlayStation assets.
 
@@ -59,7 +59,7 @@ Users are expected to use legally obtained game dumps.
 
 Os usuários devem utilizar dumps de jogos obtidos legalmente.
 
-## License / Licença
+## License
 
 This fork follows the licensing terms of the upstream SharpEmu project.
 
