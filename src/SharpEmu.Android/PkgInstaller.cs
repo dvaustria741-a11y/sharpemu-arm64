@@ -196,8 +196,8 @@ internal static class PkgInstaller
         var knownId = fileName switch
         {
             "param.sfo" => (uint?)0x1000,
-            "icon0.png" => 0x1200,
-            "pic0.png" => 0x1220,
+            "icon0.png" => (uint?)0x1200,
+            "pic0.png" => (uint?)0x1220,
             _ => null,
         };
 
