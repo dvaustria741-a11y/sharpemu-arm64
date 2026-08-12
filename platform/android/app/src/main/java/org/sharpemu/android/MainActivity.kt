@@ -1700,7 +1700,7 @@ private fun HomeScreen(
                 folderBatchMode = false
                 folderPicker.launch(null)
             },
-            ExpressiveFabItem("Várias pastas", Icons.Default.FolderOpen) {
+            ExpressiveFabItem(uiText.text("Várias pastas"), Icons.Default.FolderOpen) {
                 folderBatchMode = true
                 folderPicker.launch(null)
             },
