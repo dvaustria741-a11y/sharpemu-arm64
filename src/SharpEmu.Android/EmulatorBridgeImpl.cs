@@ -67,15 +67,12 @@ public sealed class EmulatorBridgeImpl : Java.Lang.Object, IEmulatorBridge
     {
         try
         {
-            using Stream source = string.IsNullOrEmpty(sourcePath)
-                ? new FileStream(new SafeFileHandle((IntPtr)fd, ownsHandle: true), FileAccess.Read)
-                : File.OpenRead(sourcePath);
+            using var handle = string.IsNullOrEmpty(sourcePath)
+                ? new SafeFileHandle((IntPtr)fd, ownsHandle: true)
+                : File.OpenHandle(sourcePath, FileMode.Open, FileAccess.Read);
 
-            var result = PkgInstaller.Install(displayName, source, installRootPath);
+            var result = PkgInstaller.Install(displayName, handle, installRootPath);
 
-            // A successful eboot.bin extraction (once PFS support lands) still needs registering with
-            // the library the same way the "add folder" flow does; today Install() never reports Ok
-            // for that reason (see PkgInstaller's doc comment), so this is a no-op but kept ready.
             if (result.Ok)
             {
                 GameLibraryStore.AddGameFolder(displayName, result.Path);
@@ -91,7 +88,7 @@ public sealed class EmulatorBridgeImpl : Java.Lang.Object, IEmulatorBridge
 
     public int InstallProgress => PkgInstaller.Progress;
     public int DeleteProgress => 0;
-    public void CancelInstallPkg() { }
+    public void CancelInstallPkg() => PkgInstaller.Cancel();
     public string GpuDrivers => "[]";
     public bool SelectGpuDriver(string driverId) => false;
     public string InstallGpuDriver(string displayName, int fd) => "{}";

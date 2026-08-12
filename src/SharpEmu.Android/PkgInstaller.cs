@@ -1,83 +1,114 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Buffers.Binary;
-using System.Text;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Android;
 
 /// <summary>
-/// Parses the outer PS4 PKG container (header + big-endian file table — this part of the format is
-/// a plain, unencrypted archive index, standardized across every PS4 packaging tool) and extracts
-/// what it can: sce_sys metadata (param.sfo → param.json, icon0.png, pic0.png), then registers the
-/// title with <see cref="GameLibraryStore"/>.
+/// Installs a PS4 PKG by calling into <c>libbachata_pkg.so</c> — a prebuilt native library from the
+/// Bachata S4 project (GPL-2.0-or-later, same license as SharpEmu; see
+/// jniLibs/arm64-v8a/NOTICE-libbachata_pkg.txt) — via P/Invoke against its plain C API
+/// (bachata_pkg_probe / bachata_pkg_extract / bachata_pkg_cancel).
 ///
-/// What this deliberately does NOT do yet: decode the actual game filesystem. The header's
-/// pkg_body_offset/pkg_body_size point at a large encrypted blob (containing pfs_image.dat) —
-/// eboot.bin and every other game file live inside that as a separate, normally AES-encrypted mini
-/// filesystem (inode/dirent table + per-block crypto) that has to be decrypted and walked on its own. That's a real subsystem (shadPS4 calls it Core::FileSys::PSF /
-/// pfs_shared_fs) that hasn't been ported to SharpEmu at all yet, on Android or desktop. Rather than
-/// fake success here (which is exactly the bug this file replaces — InstallPkg silently returning
-/// "{}"), we surface that honestly via PkgInstallResult.Message so the UI can tell the user what
-/// actually happened instead of showing an empty toast.
+/// SharpEmu itself has no PFS filesystem or key-derivation code of its own: that's real,
+/// hard-won systems code (custom inode/dirent filesystem behind AES-XTS encryption, with a
+/// multi-step RSA+HMAC key derivation) that the Bachata S4 authors already wrote, tested, and
+/// shipped against real games — re-deriving it here by hand, un-compiled and un-tested, would be
+/// far more likely to introduce silent extraction bugs than to help. We just call it.
+///
+/// Only the well-known public "fake PKG"/debug-kit key material (also used by LibOrbisPkg and
+/// shadPS4 — see PkgRsa.kt in the Bachata S4 source for provenance) is exercised when no passcode
+/// is supplied, which is what this class does. That decrypts homebrew/dev-signed packages. A real
+/// retail PKG will make the library report <see cref="Status.NeedPasscode"/> instead of silently
+/// failing or being force-decrypted — SharpEmu does not attempt to supply or derive a real
+/// publisher's retail entitlement key on the user's behalf.
 /// </summary>
 internal static class PkgInstaller
 {
-    private const uint Magic = 0x7F434E54;
+    private enum Status
+    {
+        Ok = 0,
+        NeedPasscode = 1,
+        Cancelled = 2,
+        Error = 3,
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BachataPkgProbe
+    {
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 0x30)]
+        public byte[] ContentId;
+        public ulong PackageSize;
+        public ulong PfsImageSize;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 0x80)]
+        public byte[] TitleHint;
+        public int Status;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 256)]
+        public byte[] Message;
+
+        public static BachataPkgProbe Create() => new()
+        {
+            ContentId = new byte[0x30],
+            TitleHint = new byte[0x80],
+            Message = new byte[256],
+        };
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void ProgressCallback(
+        IntPtr ctx, ulong done, ulong total, [MarshalAs(UnmanagedType.LPUTF8Str)] string file);
+
+    [DllImport("bachata_pkg", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int bachata_pkg_probe(int fd, ref BachataPkgProbe out_probe);
+
+    [DllImport("bachata_pkg", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int bachata_pkg_extract(
+        int fd,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string out_path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? passcode_or_null,
+        ProgressCallback progress,
+        IntPtr progress_ctx);
+
+    [DllImport("bachata_pkg", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void bachata_pkg_cancel();
 
     public static volatile int Progress;
 
     public readonly record struct PkgInstallResult(bool Ok, string Message, string Path);
 
-    public static PkgInstallResult Install(string displayName, Stream source, string installRootPath)
+    public static void Cancel() => bachata_pkg_cancel();
+
+    public static PkgInstallResult Install(string displayName, SafeFileHandle handle, string installRootPath)
     {
         Progress = 0;
+        var refAdded = false;
         try
         {
-            Span<byte> headerBuf = stackalloc byte[0x80];
-            if (source.Read(headerBuf) != headerBuf.Length)
+            handle.DangerousAddRef(ref refAdded);
+            var fd = (int)handle.DangerousGetHandle();
+
+            var probe = BachataPkgProbe.Create();
+            var probeStatus = (Status)bachata_pkg_probe(fd, ref probe);
+            if (probeStatus == Status.NeedPasscode)
             {
-                return new PkgInstallResult(false, "File is too small to be a valid PKG", "");
+                return new PkgInstallResult(
+                    false,
+                    "This PKG needs a real retail entitlement key (passcode) to decrypt \u2014 " +
+                    "SharpEmu only auto-decrypts homebrew/dev-signed packages. Installing a legitimate " +
+                    "retail dump needs its passcode supplied explicitly.",
+                    "");
             }
 
-            if (BinaryPrimitives.ReadUInt32BigEndian(headerBuf) != Magic)
+            if (probeStatus != Status.Ok)
             {
-                return new PkgInstallResult(false, "Not a PS4 PKG file (bad magic)", "");
+                var probeMessage = TrimNullTerminated(probe.Message);
+                return new PkgInstallResult(false, string.IsNullOrEmpty(probeMessage) ? "Not a valid PKG file" : probeMessage, "");
             }
 
-            var entryCount = BinaryPrimitives.ReadUInt32BigEndian(headerBuf[0x10..]);
-            var tableOffset = BinaryPrimitives.ReadUInt32BigEndian(headerBuf[0x18..]);
-            // pkg_body_offset/pkg_body_size (both uint64) point at the actual encrypted game-data
-            // blob (which contains pfs_image.dat). This is NOT one of the small file-table entries
-            // below — those only ever hold metadata (param.sfo, icons, license, playgo, etc). Confirmed
-            // against the documented PS4 PKG header layout; a previous version of this code searched
-            // the file-table names for "pfs_image" instead, which doesn't exist there and always
-            // reported "no pfs_image entry" even for perfectly valid game packages.
-            var bodySize = BinaryPrimitives.ReadUInt64BigEndian(headerBuf[0x28..]);
-            var contentId = Encoding.ASCII.GetString(headerBuf[0x40..0x64]).TrimEnd('\0');
-
-            if (entryCount == 0 || entryCount > 4096)
-            {
-                return new PkgInstallResult(false, "PKG file table looks corrupt (bad entry count)", "");
-            }
-
-            Progress = 5;
-
-            var entries = ReadFileTable(source, tableOffset, entryCount);
-            if (entries.Count == 0)
-            {
-                return new PkgInstallResult(false, "Could not read the PKG file table", "");
-            }
-
-            // Entry id 0x0200 holds the null-terminated name of every other entry, back to back, in
-            // table order — that's how we resolve "which entry is param.sfo" without depending on the
-            // exact numeric entry-id assignments (which do vary a bit between pkg generator versions).
-            var namesEntry = entries.FirstOrDefault(e => e.Id == 0x0200);
-            var nameBlob = namesEntry.Size > 0 ? ReadNameTable(source, namesEntry) : [];
-
-            Progress = 15;
-
+            var contentId = TrimNullTerminated(probe.ContentId);
             var safeFolderName = string.IsNullOrWhiteSpace(contentId)
                 ? SanitizeFileName(Path.GetFileNameWithoutExtension(displayName))
                 : SanitizeFileName(contentId);
@@ -85,151 +116,60 @@ internal static class PkgInstaller
             var installRoot = string.IsNullOrWhiteSpace(installRootPath)
                 ? Path.Combine(AndroidHostPaths.ExternalFilesRoot ?? AndroidHostPaths.InternalFilesRoot ?? Path.GetTempPath(), "Games")
                 : installRootPath;
-
             var gameDir = Path.Combine(installRoot, safeFolderName);
-            var sceSysDir = Path.Combine(gameDir, "sce_sys");
-            Directory.CreateDirectory(sceSysDir);
+            Directory.CreateDirectory(gameDir);
 
-            var sfoOnDisk = ExtractNamedEntry(source, entries, nameBlob, "param.sfo", Path.Combine(sceSysDir, "param.sfo"));
-            ExtractNamedEntry(source, entries, nameBlob, "icon0.png", Path.Combine(sceSysDir, "icon0.png"));
-            ExtractNamedEntry(source, entries, nameBlob, "pic0.png", Path.Combine(sceSysDir, "pic0.png"));
-
-            Progress = 40;
-
-            if (sfoOnDisk)
+            ProgressCallback onProgress = (_, done, total, _) =>
             {
-                ParamSfo.TryConvertToJson(
-                    Path.Combine(sceSysDir, "param.sfo"),
-                    Path.Combine(sceSysDir, "param.json"));
-            }
+                Progress = total == 0 ? 0 : (int)Math.Clamp(done * 100UL / total, 0, 100);
+            };
 
-            Progress = 50;
+            var extractStatus = (Status)bachata_pkg_extract(fd, gameDir, passcode_or_null: null, onProgress, IntPtr.Zero);
+            GC.KeepAlive(onProgress);
 
-            var hasGameData = bodySize > 0;
-
-            if (!hasGameData)
+            if (extractStatus == Status.NeedPasscode)
             {
                 return new PkgInstallResult(
                     false,
-                    "PKG header reports no body content — this doesn't look like a full game package",
+                    "This PKG needs a real retail entitlement key (passcode) to decrypt \u2014 " +
+                    "SharpEmu only auto-decrypts homebrew/dev-signed packages.",
                     gameDir);
             }
 
-            // TODO: decrypt + mount pfs_image and extract eboot.bin/sce_module/etc. Needs the PFS
-            // filesystem + AES key derivation ported from a real PS4 PKG reference implementation —
-            // see the class doc comment. Until then, be honest instead of reporting fake success.
-            return new PkgInstallResult(
-                false,
-                $"Metadata extracted (title info + icons); found a {bodySize / (1024 * 1024)} MB game-data " +
-                "body, but decrypting/extracting it (PFS image) isn't implemented yet — the game itself " +
-                "wasn't installed.",
-                gameDir);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            return new PkgInstallResult(false, $"Install failed: {exception.Message}", "");
+            if (extractStatus == Status.Cancelled)
+            {
+                return new PkgInstallResult(false, "Install cancelled", gameDir);
+            }
+
+            if (extractStatus != Status.Ok)
+            {
+                return new PkgInstallResult(false, "PKG extraction failed \u2014 see logcat for details", gameDir);
+            }
+
+            var sfoPath = Path.Combine(gameDir, "sce_sys", "param.sfo");
+            if (File.Exists(sfoPath))
+            {
+                ParamSfo.TryConvertToJson(sfoPath, Path.Combine(gameDir, "sce_sys", "param.json"));
+            }
+
+            return new PkgInstallResult(true, "Installed", gameDir);
         }
         finally
         {
+            if (refAdded)
+            {
+                handle.DangerousRelease();
+            }
+
             Progress = 100;
         }
     }
 
-    private readonly record struct PkgEntry(uint Id, uint NameOffset, uint Flags1, uint Offset, uint Size);
-
-    private static List<PkgEntry> ReadFileTable(Stream source, uint tableOffset, uint entryCount)
+    private static string TrimNullTerminated(byte[] bytes)
     {
-        var result = new List<PkgEntry>((int)entryCount);
-        var buf = new byte[32];
-        source.Seek(tableOffset, SeekOrigin.Begin);
-        for (var i = 0; i < entryCount; i++)
-        {
-            if (source.Read(buf, 0, buf.Length) != buf.Length)
-            {
-                break;
-            }
-
-            result.Add(new PkgEntry(
-                Id: BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(0)),
-                NameOffset: BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(4)),
-                Flags1: BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(8)),
-                Offset: BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(16)),
-                Size: BinaryPrimitives.ReadUInt32BigEndian(buf.AsSpan(20))));
-        }
-
-        return result;
-    }
-
-    // Reads the raw name-table bytes as-is (no UTF-8 round-trip) — every PkgEntry.NameOffset is a
-    // byte offset into this blob, and round-tripping through a C# string first would corrupt those
-    // offsets if the blob contains anything that isn't valid UTF-8.
-    private static byte[] ReadNameTable(Stream source, PkgEntry namesEntry)
-    {
-        if (namesEntry.Size == 0 || namesEntry.Size > 1024 * 1024)
-        {
-            return [];
-        }
-
-        var blob = new byte[namesEntry.Size];
-        source.Seek(namesEntry.Offset, SeekOrigin.Begin);
-        return source.Read(blob, 0, blob.Length) == blob.Length ? blob : [];
-    }
-
-    private static string NameAt(byte[] nameBlob, uint offset)
-    {
-        if (offset >= nameBlob.Length)
-        {
-            return "";
-        }
-
-        var end = Array.IndexOf(nameBlob, (byte)0, (int)offset);
-        var len = end >= 0 ? end - (int)offset : nameBlob.Length - (int)offset;
-        return Encoding.UTF8.GetString(nameBlob, (int)offset, len);
-    }
-
-    private static bool ExtractNamedEntry(
-        Stream source, List<PkgEntry> entries, byte[] nameBlob, string fileName, string destPath)
-    {
-        // Known-stable numeric IDs (documented across every PS4 PKG tool) as a fallback in case this
-        // PKG generator didn't populate the entry_names table for a given entry — that's a known
-        // real-world quirk (see shadPS4 issue #4, "Missing filenames based on id in pkg extraction").
-        var knownId = fileName switch
-        {
-            "param.sfo" => (uint?)0x1000,
-            "icon0.png" => (uint?)0x1200,
-            "pic0.png" => (uint?)0x1220,
-            _ => null,
-        };
-
-        foreach (var entry in entries)
-        {
-            var name = NameAt(nameBlob, entry.NameOffset);
-            var matches = name.EndsWith(fileName, StringComparison.OrdinalIgnoreCase)
-                || (name.Length == 0 && knownId.HasValue && entry.Id == knownId.Value);
-            if (!matches)
-            {
-                continue;
-            }
-
-            if ((entry.Flags1 & 0x80000000) != 0)
-            {
-                // Encrypted entry (rare for these small metadata files, but possible) — skip rather
-                // than write garbage bytes to disk.
-                return false;
-            }
-
-            source.Seek(entry.Offset, SeekOrigin.Begin);
-            var buf = new byte[entry.Size];
-            if (source.Read(buf, 0, buf.Length) != buf.Length)
-            {
-                return false;
-            }
-
-            File.WriteAllBytes(destPath, buf);
-            return true;
-        }
-
-        return false;
+        var end = Array.IndexOf(bytes, (byte)0);
+        var len = end >= 0 ? end : bytes.Length;
+        return System.Text.Encoding.UTF8.GetString(bytes, 0, len);
     }
 
     private static string SanitizeFileName(string name)

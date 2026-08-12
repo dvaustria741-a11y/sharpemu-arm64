@@ -1,0 +1,24 @@
+libbachata_pkg.so
+==================
+
+Prebuilt from the Bachata S4 project (https://github.com/JICA98/Bachata-S4),
+release v0.1.7, extracted from lib/arm64-v8a/libbachata_pkg.so in the
+published bachatas4-0.1.7-release.apk asset.
+
+License: GNU General Public License v2.0 or later (same license as
+SharpEmu), see https://github.com/JICA98/Bachata-S4/blob/main/LICENSE.
+
+This library implements PS4 PKG/PFS parsing, key derivation, and
+decryption/extraction. SharpEmu calls its plain C API
+(bachata_pkg_probe / bachata_pkg_extract / bachata_pkg_cancel, declared in
+that project's core/runtime/src/main/cpp/pkg/pkg_extractor.h) directly via
+P/Invoke from SharpEmu.Android/PkgInstaller.cs, rather than re-implementing
+PFS parsing and key derivation from scratch in C#.
+
+Only the well-known public "fake PKG" / debug-kit key material already
+published by the PS4 homebrew/emulation community (also used by
+LibOrbisPkg and shadPS4) is involved — see that project's
+PkgRsa.kt for the exact provenance note. It decrypts homebrew/dev-signed
+packages; it does not carry or use any real Sony production retail signing
+key. Installing a real retail PKG requires supplying your own legitimately
+obtained entitlement key as the "passcode" argument.
