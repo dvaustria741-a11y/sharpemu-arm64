@@ -13,11 +13,10 @@ namespace SharpEmu.Android;
 /// what it can: sce_sys metadata (param.sfo → param.json, icon0.png, pic0.png), then registers the
 /// title with <see cref="GameLibraryStore"/>.
 ///
-/// What this deliberately does NOT do yet: decode the actual game filesystem. The pkg file table only
-/// lists a handful of outer entries (param.sfo, icons, playgo/changeinfo metadata, and one or more
-/// "pfs_image" blobs) — eboot.bin and every other game file live *inside* that pfs_image as a separate,
-/// normally AES-encrypted mini filesystem (inode/dirent table + per-block crypto) that has to be
-/// decrypted and walked on its own. That's a real subsystem (shadPS4 calls it Core::FileSys::PSF /
+/// What this deliberately does NOT do yet: decode the actual game filesystem. The header's
+/// pkg_body_offset/pkg_body_size point at a large encrypted blob (containing pfs_image.dat) —
+/// eboot.bin and every other game file live inside that as a separate, normally AES-encrypted mini
+/// filesystem (inode/dirent table + per-block crypto) that has to be decrypted and walked on its own. That's a real subsystem (shadPS4 calls it Core::FileSys::PSF /
 /// pfs_shared_fs) that hasn't been ported to SharpEmu at all yet, on Android or desktop. Rather than
 /// fake success here (which is exactly the bug this file replaces — InstallPkg silently returning
 /// "{}"), we surface that honestly via PkgInstallResult.Message so the UI can tell the user what
@@ -49,6 +48,13 @@ internal static class PkgInstaller
 
             var entryCount = BinaryPrimitives.ReadUInt32BigEndian(headerBuf[0x10..]);
             var tableOffset = BinaryPrimitives.ReadUInt32BigEndian(headerBuf[0x18..]);
+            // pkg_body_offset/pkg_body_size (both uint64) point at the actual encrypted game-data
+            // blob (which contains pfs_image.dat). This is NOT one of the small file-table entries
+            // below — those only ever hold metadata (param.sfo, icons, license, playgo, etc). Confirmed
+            // against the documented PS4 PKG header layout; a previous version of this code searched
+            // the file-table names for "pfs_image" instead, which doesn't exist there and always
+            // reported "no pfs_image entry" even for perfectly valid game packages.
+            var bodySize = BinaryPrimitives.ReadUInt64BigEndian(headerBuf[0x28..]);
             var contentId = Encoding.ASCII.GetString(headerBuf[0x40..0x64]).TrimEnd('\0');
 
             if (entryCount == 0 || entryCount > 4096)
@@ -99,14 +105,13 @@ internal static class PkgInstaller
 
             Progress = 50;
 
-            var hasPfsImage = entries.Any(e =>
-                NameAt(nameBlob, e.NameOffset).Contains("pfs_image", StringComparison.OrdinalIgnoreCase));
+            var hasGameData = bodySize > 0;
 
-            if (!hasPfsImage)
+            if (!hasGameData)
             {
                 return new PkgInstallResult(
                     false,
-                    "PKG has no pfs_image entry — this doesn't look like a full game package",
+                    "PKG header reports no body content — this doesn't look like a full game package",
                     gameDir);
             }
 
@@ -115,8 +120,9 @@ internal static class PkgInstaller
             // see the class doc comment. Until then, be honest instead of reporting fake success.
             return new PkgInstallResult(
                 false,
-                "Metadata extracted (title info + icons), but game-data extraction (PFS image decrypt) " +
-                "isn't implemented yet — the game itself wasn't installed.",
+                $"Metadata extracted (title info + icons); found a {bodySize / (1024 * 1024)} MB game-data " +
+                "body, but decrypting/extracting it (PFS image) isn't implemented yet — the game itself " +
+                "wasn't installed.",
                 gameDir);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -184,10 +190,23 @@ internal static class PkgInstaller
     private static bool ExtractNamedEntry(
         Stream source, List<PkgEntry> entries, byte[] nameBlob, string fileName, string destPath)
     {
+        // Known-stable numeric IDs (documented across every PS4 PKG tool) as a fallback in case this
+        // PKG generator didn't populate the entry_names table for a given entry — that's a known
+        // real-world quirk (see shadPS4 issue #4, "Missing filenames based on id in pkg extraction").
+        var knownId = fileName switch
+        {
+            "param.sfo" => (uint?)0x1000,
+            "icon0.png" => 0x1200,
+            "pic0.png" => 0x1220,
+            _ => null,
+        };
+
         foreach (var entry in entries)
         {
             var name = NameAt(nameBlob, entry.NameOffset);
-            if (!name.EndsWith(fileName, StringComparison.OrdinalIgnoreCase))
+            var matches = name.EndsWith(fileName, StringComparison.OrdinalIgnoreCase)
+                || (name.Length == 0 && knownId.HasValue && entry.Id == knownId.Value);
+            if (!matches)
             {
                 continue;
             }
