@@ -219,6 +219,19 @@ internal static class AndroidSettingsStore
         return JsonSerializer.Serialize(new { root = AndroidHostPaths.ExternalFilesRoot ?? "", settings });
     }
 
+    /// <summary>Reads a single setting's current value (or <paramref name="fallback"/> if unset/unknown).</summary>
+    public static string GetValue(string section, string key, string fallback = "")
+    {
+        var def = Defs.FirstOrDefault(d => d.Section == section && d.Key == key);
+        if (def == null)
+        {
+            return fallback;
+        }
+
+        var values = LoadValues();
+        return values.TryGetValue(DefKey(section, key), out var stored) ? stored : def.Default;
+    }
+
     /// <summary>Applies an update from <c>updateSetting(section, key, value)</c>.</summary>
     public static bool UpdateSetting(string section, string key, string value)
     {

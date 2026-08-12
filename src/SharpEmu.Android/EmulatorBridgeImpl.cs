@@ -93,9 +93,20 @@ public sealed class EmulatorBridgeImpl : Java.Lang.Object, IEmulatorBridge
     public int InstallProgress => PkgInstaller.Progress;
     public int DeleteProgress => 0;
     public void CancelInstallPkg() => PkgInstaller.Cancel();
-    public string GpuDrivers => "[]";
-    public bool SelectGpuDriver(string driverId) => false;
-    public string InstallGpuDriver(string displayName, int fd) => "{}";
+
+    // --- GPU drivers -----------------------------------------------------------------------
+    // Lists/installs/selects custom Adreno (Turnip) driver packages -- see AndroidGpuDriverStore's
+    // doc comment for what "select" does and doesn't do yet (it records the choice; the renderer
+    // doesn't load it yet, so this alone won't fix in-game rendering/crashes).
+    public string GpuDrivers => AndroidGpuDriverStore.GetDriversJson();
+    public bool SelectGpuDriver(string driverId) => AndroidGpuDriverStore.SelectDriver(driverId);
+    public string InstallGpuDriver(string displayName, int fd)
+    {
+        var handle = new SafeFileHandle((IntPtr)fd, ownsHandle: true);
+        var result = AndroidGpuDriverStore.Install(displayName, handle);
+        return JsonSerializer.Serialize(new { ok = result.Ok, message = result.Message, path = result.Path });
+    }
+
     public string InstallLsfgDll(string displayName, int fd) => "{}";
 
     // --- Virtual gamepad -----------------------------------------------------------------------
