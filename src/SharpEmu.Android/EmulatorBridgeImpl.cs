@@ -44,13 +44,17 @@ public sealed class EmulatorBridgeImpl : Java.Lang.Object, IEmulatorBridge
     public string AppRoot => AndroidHostPaths.ExternalFilesRoot ?? AndroidHostPaths.InternalFilesRoot ?? string.Empty;
 
     // --- Settings / library / trophies / patches / cheats / GPU drivers ---------------------
-    // TODO: real implementations — port from shadPS4's Core::Android::* (android_app_host.cpp) once
-    // SharpEmu has the equivalent config/game-scan/trophy/patch/cheat subsystems wired for Android.
-    // Stubbed with empty-but-valid JSON so the Kotlin UI doesn't crash while this is built out.
+    // Global settings (General/CPU/GPU/Vulkan/Audio/Log/Debug/Android) are now backed by
+    // AndroidSettingsStore -- see its doc comment for how the section list drives the category
+    // cards the Kotlin Settings screen renders. Per-game settings, trophies, patches, and cheats
+    // are still TODO: port from shadPS4's Core::Android::* (android_app_host.cpp) once SharpEmu has
+    // the equivalent game-scan/trophy/patch/cheat subsystems wired for Android. Left stubbed with
+    // empty-but-valid JSON so the Kotlin UI doesn't crash while those are built out.
     // loadSettings()/loadGameSettings() in EmulatorRepository.kt read these with the UNSAFE
     // root.getJSONArray("settings") (no .opt fallback) — the "settings" key must always be present.
-    public string Settings => "{\"root\":\"\",\"settings\":[]}";
-    public bool UpdateSetting(string section, string key, string value) => false;
+    public string Settings => AndroidSettingsStore.GetSettingsJson();
+    public bool UpdateSetting(string section, string key, string value) =>
+        AndroidSettingsStore.UpdateSetting(section, key, value);
     public string Games => GameLibraryStore.GetGames();
     public string GetGameDetails(string gameId) => "{}";
     public bool AddGameFolder(string displayName, string uri) => GameLibraryStore.AddGameFolder(displayName, uri);
