@@ -175,7 +175,14 @@ internal static class GameLibraryStore
             var paramPath = Path.Combine(directory, "sce_sys", "param.json");
             if (!File.Exists(paramPath))
             {
-                return (null, null, null);
+                // Folders imported straight from a console dump or another tool typically carry
+                // sce_sys/param.sfo but not our own param.json convenience format — convert it in
+                // place rather than showing the game with no title/version at all.
+                var sfoPath = Path.Combine(directory, "sce_sys", "param.sfo");
+                if (!File.Exists(sfoPath) || !ParamSfo.TryConvertToJson(sfoPath, paramPath))
+                {
+                    return (null, null, null);
+                }
             }
 
             using var document = JsonDocument.Parse(File.ReadAllText(paramPath));
